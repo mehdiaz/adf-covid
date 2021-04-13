@@ -1,0 +1,89 @@
+{
+	"name": "df_hospitalizations",
+	"properties": {
+		"type": "MappingDataFlow",
+		"typeProperties": {
+			"sources": [
+				{
+					"dataset": {
+						"referenceName": "ds_hospitalizations",
+						"type": "DatasetReference"
+					},
+					"name": "hopspitalizationsSource"
+				},
+				{
+					"dataset": {
+						"referenceName": "ds_country_code",
+						"type": "DatasetReference"
+					},
+					"name": "countryCodesSource"
+				},
+				{
+					"dataset": {
+						"referenceName": "ds_dates_dimension",
+						"type": "DatasetReference"
+					},
+					"name": "dateDim"
+				}
+			],
+			"sinks": [
+				{
+					"dataset": {
+						"referenceName": "ds_hospitalizations_processed",
+						"type": "DatasetReference"
+					},
+					"name": "WeeklyHospitalSink"
+				},
+				{
+					"dataset": {
+						"referenceName": "ds_daily_occupancy",
+						"type": "DatasetReference"
+					},
+					"name": "DailyOccupancySink"
+				}
+			],
+			"transformations": [
+				{
+					"name": "changeColumns"
+				},
+				{
+					"name": "countryLookup"
+				},
+				{
+					"name": "deduplicateColumns"
+				},
+				{
+					"name": "splitDailyFromWeekly"
+				},
+				{
+					"name": "transformWeekOfYearColumn"
+				},
+				{
+					"name": "AggDimDate"
+				},
+				{
+					"name": "weekJoin"
+				},
+				{
+					"name": "PivotDailyData"
+				},
+				{
+					"name": "pivotWeeklyData"
+				},
+				{
+					"name": "SortWeekly"
+				},
+				{
+					"name": "SortDaily"
+				},
+				{
+					"name": "Select1"
+				},
+				{
+					"name": "Select2"
+				}
+			],
+			"script": "source(output(\n\t\tcountry as string,\n\t\tindicator as string,\n\t\tdate as date,\n\t\tyear_week as string,\n\t\tvalue as double,\n\t\tsource as string,\n\t\turl as string\n\t),\n\tallowSchemaDrift: true,\n\tvalidateSchema: false,\n\tignoreNoFilesFound: false,\n\tinferDriftedColumnTypes: true) ~> hopspitalizationsSource\nsource(output(\n\t\tcountry as string,\n\t\tcountry_code_2_digit as string,\n\t\tcountry_code_3_digit as string,\n\t\tcontinent as string,\n\t\tpopulation as string\n\t),\n\tallowSchemaDrift: true,\n\tvalidateSchema: false,\n\tignoreNoFilesFound: false,\n\tinferDriftedColumnTypes: true) ~> countryCodesSource\nsource(output(\n\t\tdate_key as string,\n\t\tdate as string,\n\t\tyear as string,\n\t\tmonth as string,\n\t\tday as string,\n\t\tday_name as string,\n\t\tday_of_year as string,\n\t\tweek_of_month as string,\n\t\tweek_of_year as string,\n\t\tmonth_name as string,\n\t\tyear_month as string,\n\t\tyear_week as string\n\t),\n\tallowSchemaDrift: true,\n\tvalidateSchema: false,\n\tignoreNoFilesFound: false,\n\tinferDriftedColumnTypes: true) ~> dateDim\nhopspitalizationsSource select(mapColumn(\n\t\tcountry,\n\t\tindicator,\n\t\treported_date = date,\n\t\treported_year_week = year_week,\n\t\tvalue,\n\t\tsource\n\t),\n\tskipDuplicateMapInputs: true,\n\tskipDuplicateMapOutputs: true) ~> changeColumns\nchangeColumns, countryCodesSource lookup(changeColumns@country == countryCodesSource@country,\n\tmultiple: false,\n\tpickup: 'any',\n\tbroadcast: 'auto')~> countryLookup\ncountryLookup select(mapColumn(\n\t\tcountry = changeColumns@country,\n\t\tindicator,\n\t\treported_date,\n\t\treported_year_week,\n\t\tvalue,\n\t\tsource,\n\t\tcountry_code_2_digit,\n\t\tcountry_code_3_digit,\n\t\tcontinent,\n\t\tpopulation\n\t),\n\tskipDuplicateMapInputs: true,\n\tskipDuplicateMapOutputs: true) ~> deduplicateColumns\ndeduplicateColumns split(indicator == 'Weekly new hospital admissions per 100k' || indicator == 'Weekly new hospital ICU per 100k',\n\tdisjoint: false) ~> splitDailyFromWeekly@(weeklyData, dailyData)\ndateDim derive(ECDC_Week = year + '-W' + lpad(week_of_year , 2, '0')) ~> transformWeekOfYearColumn\ntransformWeekOfYearColumn aggregate(groupBy(ECDC_Week),\n\tweek_start_date = min(date),\n\t\tweek_end_date = max(date)) ~> AggDimDate\nsplitDailyFromWeekly@weeklyData, AggDimDate join(reported_year_week == ECDC_Week,\n\tjoinType:'inner',\n\tbroadcast: 'auto')~> weekJoin\nsplitDailyFromWeekly@dailyData pivot(groupBy(country,\n\t\tpopulation,\n\t\treported_year_week,\n\t\tcontinent,\n\t\tcountry_code_3_digit,\n\t\tcountry_code_2_digit,\n\t\tsource,\n\t\treported_date),\n\tpivotBy(indicator, ['Daily hospital occupancy', 'Daily ICU occupancy']),\n\tsum_value = sum(value),\n\tcolumnNaming: '$V_$Ncount',\n\tlateral: true) ~> PivotDailyData\nweekJoin pivot(groupBy(country,\n\t\treport_date = reported_date,\n\t\tpopulation,\n\t\tcountry_code_3_digit,\n\t\tcontinent,\n\t\treported_year_week,\n\t\tsource,\n\t\tcountry_code_2_digit),\n\tpivotBy(indicator, ['Weekly new hospital admissions per 100k', 'Weekly new ICU admissions per 100k']),\n\tvalue = sum(value),\n\tcolumnNaming: '$V_$N',\n\tlateral: true) ~> pivotWeeklyData\npivotWeeklyData sort(desc(reported_year_week, true),\n\tasc(country, true),\n\tpartitionBy('hash', 1)) ~> SortWeekly\nPivotDailyData sort(desc(reported_date, true),\n\tasc(country, true),\n\tpartitionBy('hash', 1)) ~> SortDaily\nSortWeekly select(mapColumn(\n\t\tcountry,\n\t\treport_date,\n\t\tpopulation,\n\t\tcountry_code_3_digit,\n\t\tcontinent,\n\t\treported_year_week,\n\t\tsource,\n\t\tcountry_code_2_digit,\n\t\tweekly_hos_pitaladmissions = {Weekly new hospital admissions per 100k_value},\n\t\tweekly_icu_admissions = {Weekly new ICU admissions per 100k_value}\n\t),\n\tskipDuplicateMapInputs: true,\n\tskipDuplicateMapOutputs: true) ~> Select1\nSortDaily select(mapColumn(\n\t\tcountry,\n\t\tpopulation,\n\t\treported_year_week = {PivotDailyData@reported_year_week},\n\t\tcontinent,\n\t\tcountry_code_3_digit,\n\t\tcountry_code_2_digit,\n\t\treported_year_week = {PivotDailyData@reported_year_week},\n\t\tsource,\n\t\treported_date,\n\t\tdaily_hospital_occupancy = {Daily hospital occupancy_sum_valuecount},\n\t\tdaily_icu_occupancy = {Daily ICU occupancy_sum_valuecount}\n\t),\n\tskipDuplicateMapInputs: true,\n\tskipDuplicateMapOutputs: true) ~> Select2\nSelect1 sink(input(\n\t\tcountry as string,\n\t\treport_date as string,\n\t\tsource as string,\n\t\tpopulation as string,\n\t\tcountry_code as string,\n\t\t{_confirmed_casescount} as string,\n\t\t{_deathscount} as string\n\t),\n\tallowSchemaDrift: true,\n\tvalidateSchema: false,\n\ttruncate: true,\n\tskipDuplicateMapInputs: true,\n\tskipDuplicateMapOutputs: true) ~> WeeklyHospitalSink\nSelect2 sink(input(\n\t\tcountry as string,\n\t\treport_date as string,\n\t\tsource as string,\n\t\tpopulation as string,\n\t\tcountry_code as string,\n\t\t{_confirmed_casescount} as string,\n\t\t{_deathscount} as string\n\t),\n\tallowSchemaDrift: true,\n\tvalidateSchema: false,\n\ttruncate: true,\n\tskipDuplicateMapInputs: true,\n\tskipDuplicateMapOutputs: true) ~> DailyOccupancySink"
+		}
+	}
+}
